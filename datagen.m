@@ -1,9 +1,9 @@
 pats = {'6140', '6227', '6232', '6255', '6383a', '6383b', '6395', '6396a', '6396b', '6527', '7063', '7574', '7577', '7608', '7634', '7771', '7890', '7943'};
-ns = {284, 300, 275, 330, 173, 173, 73, 268, 284, 258, 448, 295, 320, 364, 176, 290, 293, 291};
-unthresholded = 'TRUE';
-if unthresholded == 'TRUE'
-    cd Unthresholded
-end
+ns = {284, 300, 275, 330, 173, 173, 73, 268, 284, 258, 448, 295, 320, 364, 176, 290, 293, 291}; %num of readings per patient/1000
+%unthresholded = 'TRUE';
+%if unthresholded == 'TRUE'
+%    cd Unthresholded
+%end
 
 for i = 1:length(ns) %for each patient
     pat = pats{i};   %set patient number
@@ -32,7 +32,7 @@ for i = 1:length(ns) %for each patient
             [in_deg,out_deg,deg] = degrees_dir(A);       %node degrees
             in_deg_mean = mean(in_deg);
             in_deg_std = std(in_deg);
-            out_deg_mean = mean(out_deg);
+            %out_deg_mean = mean(out_deg);
             out_deg_std = std(out_deg);
 
             deg_dif = in_deg - out_deg;                  %difference between in and out degree
@@ -46,7 +46,7 @@ for i = 1:length(ns) %for each patient
             
             in_str_mean = mean(in_str);
             in_str_std = std(in_str);
-            out_str_mean = mean(out_str);
+            %out_str_mean = mean(out_str);
             out_str_std = std(out_str);
 
             str_dif = in_str - out_str;                  %difference between in and out strength
@@ -64,8 +64,8 @@ for i = 1:length(ns) %for each patient
 
             E_glob = efficiency_wei(A, 0);               %global efficiency
             E_loc = efficiency_wei(A, 2);                %local (node) efficiencies
-            E_loc_mean = mean(E_loc);
-            E_loc_std = std(E_loc);
+            %E_loc_mean = mean(E_loc);
+            %E_loc_std = std(E_loc);
 
             [comms,Q] = modularity_dir(A);               %optimal community structure and modularity
 
@@ -80,7 +80,32 @@ for i = 1:length(ns) %for each patient
 
             %E_cost = E_glob - K;                        %cost efficiency (removed as we create later) 
 
-            vars = [in_deg_mean, in_deg_std, out_deg_mean, out_deg_std, deg_dif_std, in_str_mean, in_str_std, out_str_mean, out_str_std, str_dif_std, EBC_mean, EBC_std, NBC_mean, NBC_std, dens, K, E_glob, E_loc_mean, E_loc_std, Q, C_mean, C_std, R_oi, R_io, R_oo, R_ii];
+            vars = [in_deg_mean, 
+                    in_deg_std, 
+                    %out_deg_mean, %collinear with in_deg_mean
+                    out_deg_std, 
+                    deg_dif_std, 
+                    in_str_mean, 
+                    in_str_std, 
+                    %out_str_mean, %collinear with in_str_mean
+                    out_str_std, 
+                    str_dif_std, 
+                    EBC_mean, 
+                    EBC_std, 
+                    NBC_mean, 
+                    NBC_std, 
+                    dens, 
+                    K, 
+                    E_glob, 
+                    %E_loc_mean, %equivalent to C_mean
+                    %E_loc_std, %equivalent to C_std
+                    Q, 
+                    C_mean, 
+                    C_std,
+                    R_oi, 
+                    R_io, 
+                    R_oo, 
+                    R_ii];
             dat = [dat;vars];
         end
         dlmwrite(strcat(letter,'metrics_pat',pat,'.txt'),dat,'delimiter','\t');
