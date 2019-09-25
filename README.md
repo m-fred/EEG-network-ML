@@ -17,5 +17,7 @@ M4R_mlfinal.Rmd : performs all machine learning and visualisations (messy due to
 M4R_nnonly.Rmd : only performs neural network and made to expect only one batch of matrices. Also compares two training/testing subsetting methods.
 
 metricdata_upc.txt : metric data for unthresholded parcorr batch
+
 metricdata_bpc.txt : metric data for backboned parcorr batch
+
 metricdata_pmime.txt : metric data for pmime batch
