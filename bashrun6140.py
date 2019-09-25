@@ -62,4 +62,4 @@ data1 = data[i:(i+1000),]
 dataframe1 = pp.DataFrame(data1)
 val_matrix, link_matrix = parcorr_fn(dataframe1,var_names,tau_max)
 final_matrix = matconv_fn(val_matrix, link_matrix)
-np.save('T_mat'+str(i)+'_pat'+str(pat), final_matrix)
+np.save('T_mat_pat'+str(pat)+'_'+str(i), final_matrix)
