@@ -1,0 +1,1239 @@
+---
+title: "Machine learning study final"
+author: "Matthew Fredericks"
+date: "5th June 2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning=FALSE, message=FALSE)
+
+```
+
+# Setup
+
+```{r}
+wd1 <- getwd()
+wd2 <- paste(wd1, '/Unthresholded', sep="")
+unthresholded = 'TRUE'
+```
+
+
+```{r}
+hpats = c('6140', '6227', '6232', '6255', '6383a', '6383b', '6395', '6396a', '6396b', '7577', '7890')
+spats = c('6527', '7063', '7574', '7608', '7634', '7771', '7943')
+
+
+for (batch in c('U','T','P')){ #U=Unthresholded Tigramite(ParCorr) T=Tigramite(ParCorr), P=PMIME
+  
+  if (unthresholded == 'TRUE'){  #use unthresholded T matrices
+    if (batch=='T'){setwd(wd1)
+                    letter='T'}
+    if (batch=='P'){setwd(wd1)
+                    letter='P'}
+    if (batch=='U'){setwd(wd2)
+                    letter='T'} #set letter to T after changing directory
+  }
+
+  list <- vector(mode="list", length(hpats)+length(spats)) #initialise list of dataframes
+  count <- 0
+  
+  for (pat in hpats){
+    count <- count + 1
+    names(list)[count] <- pat
+    filename <- paste(letter, 'metrics_pat', pat, '.txt', sep="")
+    list[[count]] <- read.delim(filename, header=FALSE) #import data
+  }
+  
+  for (pat in spats){
+    count <- count + 1
+    names(list)[count] <- pat
+    filename <- paste(letter, 'metrics_pat', pat, '.txt', sep="")
+    list[[count]] <- read.delim(filename, header=FALSE) #import data
+  }
+  
+  sch = c(rep(0,length(hpats)),rep(1,length(spats))) #schizophrenia indicator
+  
+  for (i in 1:length(list)){ #for each patient
+    data1 <- list[[i]]       #retrieve dataframe
+    data <- na.omit(data1)   #listwise deletion of missing values
+    num_omitted <- dim(data1)[1]-dim(data)[1] #number of rows deleted
+    if (num_omitted != 0){
+      cat(num_omitted, "entries were deleted for patient", names(list)[i], 
+          "(batch:", batch, ") due to NAs \n")
+    }
+    data <- data[,-c(3,8,18,19)]   #remove out degree/strength mean as collinear with in degree/strength and local efficiency mean/sd (collinear with clustering coef)
+    data <- cbind(data, rep(0, dim(data)[1])) #initialise cost efficiency variable
+    data <- cbind(data, rep(names(list)[i], dim(data)[1])) #create subject ID variable
+    data <- cbind(data, factor(rep(sch[i], dim(data)[1]))) #create schizophrenia outcome variable
+    colnames(data) <- c("in_degree_mean",
+                       "in_degree_sd",
+    #                  "out_degree_mean",
+                       "out_degree_sd",
+                       "degree_difference_sd",
+                       "in_strength_mean",
+                       "in_strength_sd",
+    #                  "out_strength_mean",
+                       "out_strength_sd",
+                       "strength_difference_sd",
+                       "edge_betweenness_mean",
+                       "edge_betweenness_sd",
+                       "node_betweenness_mean",
+                       "node_betweenness_sd",
+                       "density",
+                       "wiring_cost",
+                       "global_efficiency",
+     #                  "local_efficiency_mean",
+     #                  "local_efficiency_sd",
+                       "modularity",
+                       "clustering_coefficient_mean",
+                       "clustering_coefficient_sd",
+                       "assortativity_oi",
+                       "assortativity_io",
+                       "assortativity_oo",
+                       "assortativity_ii",
+                       "cost_efficiency",
+                       "subject_id",
+                       "schizophrenia")
+    data <- as.data.frame(data)
+    list[[i]] <- data #update list
+  }
+  
+  if (batch == 'U'){
+    all_U <- Reduce(function(dtf1, dtf2) merge(dtf1, dtf2, all=TRUE), list) #create merged dataset
+    colnames(all_U) <- colnames(data)
+    n_U <- dim(all_U)[1]
+  }
+  if (batch == 'T'){
+    all_T <- Reduce(function(dtf1, dtf2) merge(dtf1, dtf2, all=TRUE), list) #create merged dataset
+    colnames(all_T) <- colnames(data)
+    n_T <- dim(all_T)[1]
+  }
+  if (batch == 'P'){
+    all_P <- Reduce(function(dtf1, dtf2) merge(dtf1, dtf2, all=TRUE), list) #create merged dataset
+    colnames(all_P) <- colnames(data)
+    n_P <- dim(all_P)[1]
+  }
+}
+
+```
+
+
+# Machine Learning
+
+In order to assess performance of classification algorithms, we must set aside an independent testing dataset that does not overlap with the training dataset used to train the algorithm. Therefore we should note that we cannot simply standardise all the data per patient like in the exploratory data analysis. This is because in order to best simulate operational conditions, the data used to train the algorithms should contain **NO** information about the data used to test the algorithms.
+
+This means we must standardise the testing set using the same scale as the training set. As we are essentially treating the testing data as unseen, it no longer makes sense to standardise each patient individually, as this would require finding the vector of training means/std. devs for each patient and scaling this patient's testing data by the same quantity (which implicitly assumes this patient is not unseen). Thus we standardise patients together, despite this meaning potential accuracy losses due to variation in experimental conditions per patient etc. 
+
+```{r}
+process_data <- function(train_inds, #indexes for training subset
+                         test_inds,  #indexes for testing subset
+                         letter){    #batch: U=unthresh. ParCorr, T=ParCorr, P=PMIME
+  if (letter=='U'){all <- all_U} #assign dataframe
+  if (letter=='T'){all <- all_T} 
+  if (letter=='P'){all <- all_P} 
+  train <- all[train_inds,]      #training dataset
+  test <- all[test_inds,]        #testing dataset
+  
+  #standardise the predictors based on TRAIN data
+  trainmeans <- attr(scale(train[,1:22]),"scaled:center") #extract train means
+  trainsds <- attr(scale(train[,1:22]),"scaled:scale")    #extract train std. devs
+  train[,1:22] <- scale(train[,1:22])                     #standardise train data
+  test[,1:22] <- scale(test[,1:22],                       #standardise test data
+                       center=trainmeans,                 #use training means
+                       scale=trainsds)                    #use training std. devs
+  
+  #cost efficiency
+  ce <- train[,15]-train[,14] #variable based on train data (global efficiency - wiring cost)
+  cemean <- mean(ce)
+  cesd <- sd(ce)
+  train[,23] <- scale(ce)
+  test[,23] <- scale(test[,15]-test[,14], center=cemean, scale=cesd)
+  return(list(train, test))
+}
+
+
+
+
+kfold <- function(k, modelpred, par, letter){
+  train_acc <- vector("numeric", k)  #initialise vector of accuracy on train data per fold
+  test_acc <- vector("numeric", k)   #initialise vector of accuracy on test data per fold
+  train_coefs <- vector("list", k)   #initialise list of coefficient values per fold
+  
+  if (letter=='U'){n <- n_U} 
+  if (letter=='T'){n <- n_T} 
+  if (letter=='P'){n <- n_P} 
+  randseq <- sample(n, n)       #initialise random sequence (unchanged for all folds)
+  size <- floor(n/k)            #size of test set for each fold
+
+  for (fold in 1:k){                                  #now fold:
+    test_inds <- randseq[((fold-1)*size+1):(fold*size)]   #take (progressive) slice as testing
+    train_inds <- (1:n)[-test_inds]                  #remaining indices for training
+
+    datalist <- process_data(train_inds, test_inds, letter) #construct datasets using these indices
+    train <- datalist[[1]]       #assign training data
+    test <- datalist[[2]]        #assign testing data
+    train_y <- train[,25]        #training labels
+    train_x <- train[,-c(24,25)] #training inputs 
+    test_y <- test[,25]          #testing labels
+    test_x <- test[,-c(24,25)]   #testing inputs 
+    
+    mtrain <- modelpred(train_x, train_x, train_y, par) #predict labels for training inputs
+    mtest <- modelpred(test_x, train_x, train_y, par)   #predict labels for testing inputs
+    
+    train_preds <- mtrain[[1]]
+    train_coefs[[fold]] <- mtrain[[2]]
+    test_preds <- mtest[[1]]
+
+    train_acc[fold] <- sum(train_y==train_preds)/length(train_y) #compare with actual y for acc.
+    test_acc[fold] <- sum(test_y==test_preds)/length(test_y)     #compare with actual y for acc.
+  }
+  means <- c(mean(train_acc), mean(test_acc)) #average accuracies over all the folds
+  coefs <- 0
+  for (i in 1:k){coefs <- coefs + train_coefs[[i]]}
+  coefs <- coefs/k
+  return(list(means, coefs)) #output cross-validated train and test accuracies, and mean coef vals
+}
+```
+
+```{r set folds}
+#set number of folds
+folds <- 5
+```
+
+## Logistic regression
+
+```{r}
+#glm <- glm(schizophrenia~. -subject_id, family=binomial(link="logit"), data=all_P[,], control = #list(maxit = 5000))
+
+#summary(glm)
+#alias(glm)
+```
+```{r lr functions}
+glm_pred <- function(inputs, train_x, train_y, cutoff){
+  glm <- glm(train_y ~. , 
+           family=binomial(link="logit"), 
+           data=train_x, 
+           control = list(maxit = 5000)
+           )
+  coefs <- glm$coefficients
+  preds <- predict(glm, inputs, type="response") #predict probabilities
+  cutvec <- rep(cutoff, length(preds))
+  preds <- ifelse(preds>cutvec, 1, 0)
+  return(list(preds, coefs))
+}
+
+#same function as above but return pvals instead of coef magnitude
+glm_pred2 <- function(inputs, train_x, train_y, cutoff){
+  glm <- glm(train_y ~. , 
+           family=binomial(link="logit"), 
+           data=train_x, 
+           control = list(maxit = 5000)
+           )
+  coefs <- coef(summary(glm))[,4]
+  preds <- predict(glm, inputs, type="response") #predict probabilities
+  cutvec <- rep(cutoff, length(preds))
+  preds <- ifelse(preds>cutvec, 1, 0)
+  return(list(preds, coefs))
+}
+```
+
+```{r lr parameter optimisation}
+library(ggplot2)
+library(gridExtra)
+library(reshape)
+
+pars <- seq(0.35,0.65,0.01)
+n <- length(pars)
+trainaccsU <- vector("numeric", n)
+testaccsU <- vector("numeric", n)
+trainaccsT <- vector("numeric", n)
+testaccsT <- vector("numeric", n)
+trainaccsP <- vector("numeric", n)
+testaccsP <- vector("numeric", n)
+count = 0
+for (par in pars){
+  count = count+1
+  glmU <- kfold(k=folds, modelpred=glm_pred, par=par, letter='U')
+  trainaccsU[count] <- glmU[[1]][1]
+  testaccsU[count] <- glmU[[1]][2]
+  
+  glmT <- kfold(k=folds, modelpred=glm_pred, par=par, letter='T')
+  trainaccsT[count] <- glmT[[1]][1]
+  testaccsT[count] <- glmT[[1]][2]
+  
+  glmP <- kfold(k=folds, modelpred=glm_pred, par=par, letter='P')
+  trainaccsP[count] <- glmP[[1]][1]
+  testaccsP[count] <- glmP[[1]][2]
+}
+```
+```{r lr parameter optimisation plot}
+plot1 <- ggplot(melt(as.data.frame(cbind(pars, trainaccsU, testaccsU)), id.vars="pars")) + 
+  geom_line(aes(x=pars, y=value, col=variable, linetype=variable)) + 
+  ggtitle("Unthresh. ParCorr") +
+  xlab("Probability cutoff") +
+  ylab("Accuracy") +
+  scale_colour_manual(values=c("#6bff66","#007005"), labels=c("Training", "Testing")) +
+  scale_linetype_manual(values=c(2, 1), labels=c("Training","Testing")) +
+  theme(text = element_text(size=25),
+        legend.position=c(.8, .2), legend.title=element_blank())
+
+plot2 <- ggplot(melt(as.data.frame(cbind(pars, trainaccsT, testaccsT)), id.vars="pars")) + 
+  geom_line(aes(x=pars, y=value, col=variable, linetype=variable)) + 
+  ggtitle("ParCorr") +
+  xlab("Probability cutoff") +
+  ylab("Accuracy") +
+  scale_colour_manual(values=c("#54d4ff","blue"), labels=c("Training", "Testing")) +
+  scale_linetype_manual(values=c(2, 1), labels=c("Training","Testing")) +
+  theme(text = element_text(size=25),
+        legend.position=c(.8, .2), legend.title=element_blank())
+
+plot3 <- ggplot(melt(as.data.frame(cbind(pars, trainaccsP, testaccsP)), id.vars="pars")) + 
+  geom_line(aes(x=pars, y=value, col=variable, linetype=variable)) + 
+  ggtitle("PMIME") +
+  xlab("Probability cutoff") +
+  ylab("Accuracy") +
+  scale_colour_manual(values=c("#ff66a0","#ff0000"), labels=c("Training", "Testing")) +
+  scale_linetype_manual(values=c(2, 1), labels=c("Tra  ining","Testing")) +
+  theme(text = element_text(size=25),
+        legend.position=c(.8, .2), legend.title=element_blank()) 
+
+grid.arrange(plot1, plot2, plot3, ncol=3)
+ggsave("lropt.png",grid.arrange(plot1, plot2, plot3, ncol=3),height=7,width=15)
+```
+
+```{r lr final model}
+parmaxU <- pars[which(testaccsU==max(testaccsU))]
+cat("For unthresholded ParCorr the optimal cutoff for logistic regression is", parmaxU, "\n")
+parmaxT <- pars[which(testaccsT==max(testaccsT))]
+cat("For ParCorr the optimal cutoff for logistic regression is", parmaxT, "\n")
+parmaxP <- pars[which(testaccsP==max(testaccsP))]
+cat("For PMIME the optimal cutoff for logistic regression is", parmaxP, "\n")
+
+glmU <- kfold(k=folds, modelpred=glm_pred, par=parmaxU, letter='U')
+glmT <- kfold(k=folds, modelpred=glm_pred, par=parmaxT, letter='T')
+glmP <- kfold(k=folds, modelpred=glm_pred, par=parmaxP, letter='P')
+
+glmU2 <- kfold(k=folds, modelpred=glm_pred2, par=parmaxU, letter='U')
+glmT2 <- kfold(k=folds, modelpred=glm_pred2, par=parmaxT, letter='T')
+glmP2 <- kfold(k=folds, modelpred=glm_pred2, par=parmaxP, letter='P')
+
+if (glmU[[1]][1] > 1){stop("Accuracy error")}
+if (glmT[[1]][1] > 1){stop("Accuracy error")}
+if (glmP[[1]][1] > 1){stop("Accuracy error")}
+
+```
+```{r lr coefficient analysis}
+coefsU <- glmU[[2]][order(abs(glmU[[2]]), decreasing = TRUE)] #coefs ordered by magnitude
+
+dtf <- data.frame(x=names(coefsU),y=coefsU)
+ggplot(dtf, aes(x=names(coefsU),y=coefsU)) + 
+  geom_bar(stat = "identity", fill="#007005") + 
+  scale_y_continuous("Coefficient value") +
+  scale_x_discrete("metrics",limits=rev(names(coefsU))) + #sort in user-specified order
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) + #rotate axis labels
+  coord_flip() + #flip axes
+  ggtitle("Logistic regression coefficients for unthresholded ParCorr")
+
+
+coefsT <- glmT[[2]][order(abs(glmT[[2]]), decreasing = TRUE)] #coefs ordered by magnitude
+
+dtf <- data.frame(x=names(coefsT),y=coefsT)
+ggplot(dtf, aes(x=names(coefsT),y=coefsT)) + 
+  geom_bar(stat = "identity", fill="#1f7aa8") + 
+  scale_y_continuous("Coefficient value") +
+  scale_x_discrete("metrics",limits=rev(names(coefsT))) + #sort in user-specified order
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) + #rotate axis labels
+  coord_flip() + #flip axes
+  ggtitle("Logistic regression coefficients for ParCorr")
+
+
+coefsP <- glmP[[2]][order(abs(glmP[[2]]), decreasing = TRUE)] #coefs ordered by magnitude
+
+dtf <- data.frame(x=names(coefsP),y=coefsP)
+ggplot(dtf, aes(x=names(coefsP),y=coefsP)) + 
+  geom_bar(stat = "identity", fill="#a81f1f") + 
+  scale_y_continuous("Coefficient value") +
+  scale_x_discrete("metrics",limits=rev(names(coefsP))) + #sort in user-specified order
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) + #rotate axis labels
+  coord_flip() + #flip axes
+  ggtitle("Logistic regression coefficients for PMIME")
+
+```
+
+```{r lr pvalue analysis}
+neglogpvalsU <- -log(glmU2[[2]][-1])
+neglogpvalsU <- neglogpvalsU[order(neglogpvalsU, decreasing = TRUE)] #ordered by magnitude
+
+dtf <- data.frame(x=names(neglogpvalsU),y=neglogpvalsU)
+ggplot(dtf, aes(x=names(neglogpvalsU),y=neglogpvalsU)) + 
+  geom_bar(stat = "identity", fill="#007005") + 
+  scale_y_continuous("-log(pvalue)") +
+  scale_x_discrete("metrics",limits=rev(names(neglogpvalsU))) + #sort in user-specified order
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) + #rotate axis labels
+  coord_flip() + #flip axes
+  ggtitle("-log(pvalue) for unthresholded ParCorr")
+
+
+neglogpvalsT <- -log(glmT2[[2]][-1])
+neglogpvalsT <- neglogpvalsT[order(neglogpvalsT, decreasing = TRUE)] #ordered by magnitude
+
+dtf <- data.frame(x=names(neglogpvalsT),y=neglogpvalsT)
+ggplot(dtf, aes(x=names(neglogpvalsT),y=neglogpvalsT)) + 
+  geom_bar(stat = "identity", fill="#1f7aa8") + 
+  scale_y_continuous("-log(pvalue)") +
+  scale_x_discrete("metrics",limits=rev(names(neglogpvalsT))) + #sort in user-specified order
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) + #rotate axis labels
+  coord_flip() + #flip axes
+  ggtitle("-log(pvalue) for ParCorr")
+
+
+neglogpvalsP <- -log(glmP2[[2]][-1])
+neglogpvalsP <- neglogpvalsP[order(neglogpvalsP, decreasing = TRUE)] #ordered by magnitude
+
+dtf <- data.frame(x=names(neglogpvalsP),y=neglogpvalsP)
+ggplot(dtf, aes(x=names(neglogpvalsP),y=neglogpvalsP)) + 
+  geom_bar(stat = "identity", fill="#a81f1f") + 
+  scale_y_continuous("-log(pvalue)") +
+  scale_x_discrete("metrics",limits=rev(names(neglogpvalsP))) + #sort in user-specified order
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) + #rotate axis labels
+  coord_flip() + #flip axes
+  ggtitle("-log(pvalue) for PMIME")
+
+```
+
+## LASSO regression
+
+```{r lasso functions}
+library(glmnet)
+
+lasso_pred <- function(inputs, 
+                       train_x, 
+                       train_y, 
+                       cutoff){
+  datamat <- model.matrix(train_y~. -1, train_x)
+  cv <- cv.glmnet(datamat,
+                y=as.numeric(train_y), 
+                alpha=1)
+  lambda <- cv$lambda.1se #choose lambda.1se (1 std.dev from error minimiser - less overfit)
+  lasso_mod <- glmnet(datamat, 
+                 y=as.numeric(train_y), 
+                 alpha=1, #specify lasso penalty
+                 standardize = FALSE, 
+                 lambda = lambda,
+                 family="binomial")
+  coefs <- coef(lasso_mod)[,1]
+  preds <- predict(lasso_mod, model.matrix(~. -1,inputs), type="response") #predict probs
+  cutvec <- rep(cutoff, length(preds))
+  preds <- ifelse(preds>cutvec, 1, 0)
+  return(list(preds, coefs))
+}
+```
+
+
+```{r lasso parameter optimisation}
+pars <- c(0.35, 0.39, 0.42, seq(0.45,0.55,0.01), 0.58, 0.61, 0.65)
+n <- length(pars)
+trainaccsU <- vector("numeric", n)
+testaccsU <- vector("numeric", n)
+trainaccsT <- vector("numeric", n)
+testaccsT <- vector("numeric", n)
+trainaccsP <- vector("numeric", n)
+testaccsP <- vector("numeric", n)
+count = 0
+for (par in pars){
+  count = count+1
+  lassoU <- kfold(k=folds, modelpred=lasso_pred, par=par, letter='U')
+  trainaccsU[count] <- lassoU[[1]][1]
+  testaccsU[count] <- lassoU[[1]][2]
+  
+  lassoT <- kfold(k=folds, modelpred=lasso_pred, par=par, letter='T')
+  trainaccsT[count] <- lassoT[[1]][1]
+  testaccsT[count] <- lassoT[[1]][2]
+  
+  lassoP <- kfold(k=folds, modelpred=lasso_pred, par=par, letter='P')
+  trainaccsP[count] <- lassoP[[1]][1]
+  testaccsP[count] <- lassoP[[1]][2]
+}
+```
+```{r lasso parameter optimisation plot}
+plot1 <- ggplot(melt(as.data.frame(cbind(pars, trainaccsU, testaccsU)), id.vars="pars")) + 
+  geom_line(aes(x=pars, y=value, col=variable, linetype=variable)) + 
+  ggtitle("Unthresh. ParCorr") +
+  xlab("Probability cutoff") +
+  ylab("Accuracy") +
+  scale_colour_manual(values=c("#6bff66","#007005"), labels=c("Training", "Testing")) +
+  scale_linetype_manual(values=c(2, 1), labels=c("Training","Testing")) +
+  theme(text = element_text(size=25),
+        legend.position=c(.8, .9), legend.title=element_blank())
+
+plot2 <- ggplot(melt(as.data.frame(cbind(pars, trainaccsT, testaccsT)), id.vars="pars")) + 
+  geom_line(aes(x=pars, y=value, col=variable, linetype=variable)) + 
+  ggtitle("ParCorr") +
+  xlab("Probability cutoff") +
+  ylab("Accuracy") +
+  scale_colour_manual(values=c("#54d4ff","blue"), labels=c("Training", "Testing")) +
+  scale_linetype_manual(values=c(2, 1), labels=c("Training","Testing")) +
+  theme(text = element_text(size=25),
+        legend.position=c(.8, .9), legend.title=element_blank())
+
+plot3 <- ggplot(melt(as.data.frame(cbind(pars, trainaccsP, testaccsP)), id.vars="pars")) + 
+  geom_line(aes(x=pars, y=value, col=variable, linetype=variable)) + 
+  ggtitle("PMIME") +
+  xlab("Probability cutoff") +
+  ylab("Accuracy") +
+  scale_colour_manual(values=c("#ff66a0","#ff0000"), labels=c("Training", "Testing")) +
+  scale_linetype_manual(values=c(2, 1), labels=c("Training","Testing")) +
+  theme(text = element_text(size=25),
+        legend.position=c(.8, .9), legend.title=element_blank()) 
+
+grid.arrange(plot1, plot2, plot3, ncol=3)
+ggsave("lassoopt.png",grid.arrange(plot1, plot2, plot3, ncol=3),height=7,width=15)
+
+```
+
+Note shrinkage parameter = 0 means nonregularised logistic regression from previous section, i.e. LASSO unnecessary.
+
+
+```{r lasso final model}
+parmaxU <- pars[which(testaccsU==max(testaccsU))]
+cat("For unthresholded ParCorr the optimal cutoff is", parmaxU, "\n")
+parmaxT <- pars[which(testaccsT==max(testaccsT))]
+cat("For ParCorr the optimal cutoff is", parmaxT, "\n")
+parmaxP <- pars[which(testaccsP==max(testaccsP))]
+cat("For PMIME the optimal cutoff is", parmaxP, "\n")
+
+lassoU <- kfold(k=folds, modelpred=lasso_pred, par=parmaxU, letter='U')
+lassoT <- kfold(k=folds, modelpred=lasso_pred, par=parmaxT, letter='T')
+lassoP <- kfold(k=folds, modelpred=lasso_pred, par=parmaxP, letter='P')
+```
+
+```{r lasso coefficient analysis}
+coefsU <- lassoU[[2]][order(abs(lassoU[[2]]), decreasing = TRUE)] #coefs ordered by magnitude
+
+dtf <- data.frame(x=names(coefsU),y=coefsU)
+ggplot(dtf, aes(x=names(coefsU),y=coefsU)) + 
+  geom_bar(stat = "identity", fill="#007005") + 
+  scale_y_continuous("Coefficient value") +
+  scale_x_discrete("metrics",limits=rev(names(coefsU))) + #sort in user-specified order
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) + #rotate axis labels
+  coord_flip() + #flip axes
+  ggtitle("LASSO regression coefficients for unthresholded ParCorr")
+
+
+coefsT <- lassoT[[2]][order(abs(lassoT[[2]]), decreasing = TRUE)] #coefs ordered by magnitude
+
+dtf <- data.frame(x=names(coefsT),y=coefsT)
+ggplot(dtf, aes(x=names(coefsT),y=coefsT)) + 
+  geom_bar(stat = "identity", fill="#1f7aa8") + 
+  scale_y_continuous("Coefficient value") +
+  scale_x_discrete("metrics",limits=rev(names(coefsT))) + #sort in user-specified order
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) + #rotate axis labels
+  coord_flip() + #flip axes
+  ggtitle("LASSO regression coefficients for ParCorr")
+
+
+coefsP <- lassoP[[2]][order(abs(lassoP[[2]]), decreasing = TRUE)] #coefs ordered by magnitude
+
+dtf <- data.frame(x=names(coefsP),y=coefsP)
+ggplot(dtf, aes(x=names(coefsP),y=coefsP)) + 
+  geom_bar(stat = "identity", fill="#a81f1f") + 
+  scale_y_continuous("Coefficient value") +
+  scale_x_discrete("metrics",limits=rev(names(coefsP))) + #sort in user-specified order
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) + #rotate axis labels
+  coord_flip() + #flip axes
+  ggtitle("LASSO regression coefficients for PMIME")
+```
+
+
+## Random forest
+
+```{r rf function}
+require(randomForest)
+#rf <- randomForest(all[,25] ~., all[,-c(24,25)], importance=TRUE)
+#sort(importance(rf)[,4], decreasing=TRUE) #show variable importance 
+
+rf_pred <- function(inputs, train_x, train_y, par){
+  rf <- randomForest(train_y ~., train_x, importance=TRUE, nodesize=par)
+  preds <- predict(rf, inputs)
+  coefs <- importance(rf)[,4]
+  return(list(preds, coefs))
+}
+```
+
+```{r rf parameter optimisation}
+library(ggplot2)
+library(gridExtra)
+library(reshape)
+
+pars <- c(seq(1,10,1), seq(12,28,2), seq(30,60,5))
+n <- length(pars)
+trainaccsU <- vector("numeric", n)
+testaccsU <- vector("numeric", n)
+trainaccsT <- vector("numeric", n)
+testaccsT <- vector("numeric", n)
+trainaccsP <- vector("numeric", n)
+testaccsP <- vector("numeric", n)
+count = 0
+for (par in pars){
+  count = count+1
+  rfU <- kfold(k=folds, modelpred=rf_pred, par=par, letter='U')
+  trainaccsU[count] <- rfU[[1]][1]
+  testaccsU[count] <- rfU[[1]][2]
+  
+  rfT <- kfold(k=folds, modelpred=rf_pred, par=par, letter='T')
+  trainaccsT[count] <- rfT[[1]][1]
+  testaccsT[count] <- rfT[[1]][2]
+  
+  rfP <- kfold(k=folds, modelpred=rf_pred, par=par, letter='P')
+  trainaccsP[count] <- rfP[[1]][1]
+  testaccsP[count] <- rfP[[1]][2]
+}
+```
+```{r rf parameter optimisation plot}
+plot1 <- ggplot(melt(as.data.frame(cbind(pars, trainaccsU, testaccsU)), id.vars="pars")) + 
+  geom_line(aes(x=pars, y=value, col=variable, linetype=variable)) + 
+  ggtitle("Unthresh. ParCorr") +
+  xlab("Min. terminal node size") +
+  ylab("Accuracy") +
+  scale_colour_manual(values=c("#6bff66","#007005"), labels=c("Training", "Testing")) +
+  scale_linetype_manual(values=c(2, 1), labels=c("Training","Testing")) +
+  theme(text = element_text(size=25),
+        legend.position=c(.8, .9), legend.title=element_blank())
+
+plot2 <- ggplot(melt(as.data.frame(cbind(pars, trainaccsT, testaccsT)), id.vars="pars")) + 
+  geom_line(aes(x=pars, y=value, col=variable, linetype=variable)) + 
+  ggtitle("ParCorr") +
+  xlab("Min. terminal node size") +
+  ylab("Accuracy") +
+  scale_colour_manual(values=c("#54d4ff","blue"), labels=c("Training", "Testing")) +
+  scale_linetype_manual(values=c(2, 1), labels=c("Training","Testing")) +
+  theme(text = element_text(size=25),
+        legend.position=c(.8, .9), legend.title=element_blank())
+
+plot3 <- ggplot(melt(as.data.frame(cbind(pars, trainaccsP, testaccsP)), id.vars="pars")) + 
+  geom_line(aes(x=pars, y=value, col=variable, linetype=variable)) + 
+  ggtitle("PMIME") +
+  xlab("Min. terminal node size") +
+  ylab("Accuracy") +
+  scale_colour_manual(values=c("#ff66a0","#ff0000"), labels=c("Training", "Testing")) +
+  scale_linetype_manual(values=c(2, 1), labels=c("Training","Testing")) +
+  theme(text = element_text(size=25),
+        legend.position=c(.8, .9), legend.title=element_blank()) 
+
+grid.arrange(plot1, plot2, plot3, ncol=3)
+ggsave("rfopt.png",grid.arrange(plot1, plot2, plot3, ncol=3),height=7,width=15)
+
+```
+
+
+
+```{r rf model}
+parmaxU <- pars[which(testaccsU==max(testaccsU))]
+cat("For unthresholded ParCorr the optimal min. terminal node size is", parmaxU, "\n")
+parmaxT <- pars[which(testaccsT==max(testaccsT))]
+cat("For ParCorr the optimal min. terminal node size is", parmaxT, "\n")
+parmaxP <- pars[which(testaccsP==max(testaccsP))]
+cat("For PMIME the optimal min. terminal node size is", parmaxP, "\n")
+
+rfU <- kfold(k=folds, modelpred=rf_pred, par=parmaxU, letter='U')
+rfT <- kfold(k=folds, modelpred=rf_pred, par=parmaxT, letter='T')
+rfP <- kfold(k=folds, modelpred=rf_pred, par=parmaxP, letter='P')
+```
+```{r rf importance analysis}
+coefsU <- rfU[[2]][order(abs(rfU[[2]]), decreasing = TRUE)] #coefs ordered by magnitude
+
+dtf <- data.frame(x=names(coefsU),y=coefsU)
+ggplot(dtf, aes(x=names(coefsU),y=coefsU)) + 
+  geom_bar(stat = "identity", fill="#007005") + 
+  scale_y_continuous("Gini importance") +
+  scale_x_discrete("metrics",limits=rev(names(coefsU))) + #sort in user-specified order
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) + #rotate axis labels
+  coord_flip() + #flip axes
+  ggtitle("Gini importance for unthresholded ParCorr")
+
+
+coefsT <- rfT[[2]][order(abs(rfT[[2]]), decreasing = TRUE)] #coefs ordered by magnitude
+
+dtf <- data.frame(x=names(coefsT),y=coefsT)
+ggplot(dtf, aes(x=names(coefsT),y=coefsT)) + 
+  geom_bar(stat = "identity", fill="#1f7aa8") + 
+  scale_y_continuous("Gini importance") +
+  scale_x_discrete("metrics",limits=rev(names(coefsT))) + #sort in user-specified order
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) + #rotate axis labels
+  coord_flip() + #flip axes
+  ggtitle("Gini importance for ParCorr")
+
+
+coefsP <- rfP[[2]][order(abs(rfP[[2]]), decreasing = TRUE)] #coefs ordered by magnitude
+
+dtf <- data.frame(x=names(coefsP),y=coefsP)
+ggplot(dtf, aes(x=names(coefsP),y=coefsP)) + 
+  geom_bar(stat = "identity", fill="#a81f1f") + 
+  scale_y_continuous("Gini importance") +
+  scale_x_discrete("metrics",limits=rev(names(coefsP))) + #sort in user-specified order
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) + #rotate axis labels
+  coord_flip() + #flip axes
+  ggtitle("Gini importance for PMIME")
+```
+
+This gives the importance in ability to separate schizophrenia = 0 or 1. Look up Gini importance for more information.
+
+
+## Support vector machine
+
+```{r svm function}
+library(e1071)
+
+svm_pred <- function(inputs, train_x, train_y, par){
+  svm <- svm(train_y ~., train_x, kernel="polynomial", degree=par)
+  preds <- predict(svm, inputs)
+  coefs <- NA
+  return(list(preds, coefs))
+}
+```
+
+```{r svm parameter optimisation}
+library(ggplot2)
+library(gridExtra)
+library(reshape)
+
+pars <- seq(1,6,1)
+n <- length(pars)
+trainaccsU <- vector("numeric", n)
+testaccsU <- vector("numeric", n)
+trainaccsT <- vector("numeric", n)
+testaccsT <- vector("numeric", n)
+trainaccsP <- vector("numeric", n)
+testaccsP <- vector("numeric", n)
+count = 0
+for (par in pars){
+  count = count+1
+  svmU <- kfold(k=folds, modelpred=svm_pred, par=par, letter='U')
+  trainaccsU[count] <- svmU[[1]][1]
+  testaccsU[count] <- svmU[[1]][2]
+  
+  svmT <- kfold(k=folds, modelpred=svm_pred, par=par, letter='T')
+  trainaccsT[count] <- svmT[[1]][1]
+  testaccsT[count] <- svmT[[1]][2]
+  
+  svmP <- kfold(k=folds, modelpred=svm_pred, par=par, letter='P')
+  trainaccsP[count] <- svmP[[1]][1]
+  testaccsP[count] <- svmP[[1]][2]
+}
+```
+```{r svm parameter optimisation plot}
+plot1 <- ggplot(melt(as.data.frame(cbind(pars, trainaccsU, testaccsU)), id.vars="pars")) + 
+  geom_line(aes(x=pars, y=value, col=variable, linetype=variable)) + 
+  ggtitle("Unthresh. ParCorr") +
+  xlab("Polynomial degree") +
+  ylab("Accuracy") +
+  scale_colour_manual(values=c("#6bff66","#007005"), labels=c("Training", "Testing")) +
+  scale_linetype_manual(values=c(2, 1), labels=c("Training","Testing")) +
+  theme(text = element_text(size=25),
+        legend.position=c(.8, .9), legend.title=element_blank())
+
+plot2 <- ggplot(melt(as.data.frame(cbind(pars, trainaccsT, testaccsT)), id.vars="pars")) + 
+  geom_line(aes(x=pars, y=value, col=variable, linetype=variable)) + 
+  ggtitle("ParCorr") +
+  xlab("Polynomial degree") +
+  ylab("Accuracy") +
+  scale_colour_manual(values=c("#54d4ff","blue"), labels=c("Training", "Testing")) +
+  scale_linetype_manual(values=c(2, 1), labels=c("Training","Testing")) +
+  theme(text = element_text(size=25),
+        legend.position=c(.8, .9), legend.title=element_blank())
+
+plot3 <- ggplot(melt(as.data.frame(cbind(pars, trainaccsP, testaccsP)), id.vars="pars")) + 
+  geom_line(aes(x=pars, y=value, col=variable, linetype=variable)) + 
+  ggtitle("PMIME") +
+  xlab("Polynomial degree") +
+  ylab("Accuracy") +
+  scale_colour_manual(values=c("#ff66a0","#ff0000"), labels=c("Training", "Testing")) +
+  scale_linetype_manual(values=c(2, 1), labels=c("Training","Testing")) +
+  theme(text = element_text(size=25),
+        legend.position=c(.8, .9), legend.title=element_blank()) 
+
+grid.arrange(plot1, plot2, plot3, ncol=3)
+ggsave("svmopt.png",grid.arrange(plot1, plot2, plot3, ncol=3),height=7,width=15)
+```
+
+
+```{r svm model}
+parmaxU <- pars[which(testaccsU==max(testaccsU))]
+cat("For unthresholded ParCorr the optimal polynomial degree is", parmaxU, "\n")
+parmaxT <- pars[which(testaccsT==max(testaccsT))]
+cat("For ParCorr the optimal polynomial degree is", parmaxT, "\n")
+parmaxP <- pars[which(testaccsP==max(testaccsP))]
+cat("For PMIME the optimal polynomial degree is", parmaxP, "\n")
+
+svmU <- kfold(k=folds, modelpred=svm_pred, par=parmaxU, letter='U')
+svmT <- kfold(k=folds, modelpred=svm_pred, par=parmaxT, letter='T')
+svmP <- kfold(k=folds, modelpred=svm_pred, par=parmaxP, letter='P')
+```
+
+
+## Artificial neural network
+
+```{r nn function}
+library(nnet)
+
+nn_pred <- function(inputs, train_x, train_y, 
+                    par){ #par = list(size, MaxNWts, maxit, num_tries)
+  num_tries <- par[[4]]
+  nn_list <- vector("list", num_tries) #initialise list of nns
+  vals <- vector("numeric", num_tries) #initialise vector of final optimisation vals
+  for (i in 1:num_tries){
+    nn <- nnet(train_y ~., data=train_x, 
+               size=par[[1]], MaxNWts=par[[2]], maxit=par[[3]], trace=FALSE)
+    nn_list[[i]] <- nn #record this nn
+    vals[i] <- nn$value #record final optimisation value
+  }
+  min <- which(vals==min(vals)) #index of nn with the lowest final optimisation value
+  bestnn <- nn_list[[min]] #retrieve this nn
+  preds <- predict(bestnn, inputs, type="class")
+  coefs <- NA
+  return(list(preds, coefs))
+}
+```
+
+```{r nn parameter optimisation}
+pars <- c(seq(1,10,1),11,12,14,18,22,26)
+n <- length(pars)
+trainaccsU <- vector("numeric", n)
+testaccsU <- vector("numeric", n)
+trainaccsT <- vector("numeric", n)
+testaccsT <- vector("numeric", n)
+trainaccsP <- vector("numeric", n)
+testaccsP <- vector("numeric", n)
+count = 0
+for (par in pars){
+  count = count+1
+  nnU <- kfold(k=folds, modelpred=nn_pred, par=list(par,5000,300,10), letter='U')
+  trainaccsU[count] <- nnU[[1]][1]
+  testaccsU[count] <- nnU[[1]][2]
+  
+  nnT <- kfold(k=folds, modelpred=nn_pred, par=list(par,5000,300,10), letter='T')
+  trainaccsT[count] <- nnT[[1]][1]
+  testaccsT[count] <- nnT[[1]][2]
+  
+  nnP <- kfold(k=folds, modelpred=nn_pred, par=list(par,5000,300,10), letter='P')
+  trainaccsP[count] <- nnP[[1]][1]
+  testaccsP[count] <- nnP[[1]][2]
+}
+
+```
+
+```{r nn parameter optimisation plot}
+plot1 <- ggplot(melt(as.data.frame(cbind(pars, trainaccsU, testaccsU)), id.vars="pars")) + 
+  geom_line(aes(x=pars, y=value, col=variable, linetype=variable)) + 
+  ggtitle("Unthresh. ParCorr") +
+  xlab("Number of neurons") +
+  ylab("Accuracy") +
+  scale_colour_manual(values=c("#6bff66","#007005"), labels=c("Training", "Testing")) +
+  scale_linetype_manual(values=c(2, 1), labels=c("Training","Testing")) +
+  theme(text = element_text(size=25),
+        legend.position=c(.25, .9), legend.title=element_blank())
+
+plot2 <- ggplot(melt(as.data.frame(cbind(pars, trainaccsT, testaccsT)), id.vars="pars")) + 
+  geom_line(aes(x=pars, y=value, col=variable, linetype=variable)) + 
+  ggtitle("ParCorr") +
+  xlab("Number of neurons") +
+  ylab("Accuracy") +
+  scale_colour_manual(values=c("#54d4ff","blue"), labels=c("Training", "Testing")) +
+  scale_linetype_manual(values=c(2, 1), labels=c("Training","Testing")) +
+  theme(text = element_text(size=25),
+        legend.position=c(.25, .9), legend.title=element_blank())
+
+plot3 <- ggplot(melt(as.data.frame(cbind(pars, trainaccsP, testaccsP)), id.vars="pars")) + 
+  geom_line(aes(x=pars, y=value, col=variable, linetype=variable)) + 
+  ggtitle("PMIME") +
+  xlab("Number of neurons") +
+  ylab("Accuracy") +
+  scale_colour_manual(values=c("#ff66a0","#ff0000"), labels=c("Training", "Testing")) +
+  scale_linetype_manual(values=c(2, 1), labels=c("Training","Testing")) +
+  theme(text = element_text(size=25),
+        legend.position=c(.25, .9), legend.title=element_blank()) 
+
+grid.arrange(plot1, plot2, plot3, ncol=3)
+ggsave("nnopt.png",grid.arrange(plot1, plot2, plot3, ncol=3),height=7,width=15)
+
+```
+
+```{r nn final model}
+parmaxU <- pars[which(testaccsU==max(testaccsU))]
+cat("For unthresholded ParCorr the optimal number of neurons is", parmaxU, "\n")
+parmaxT <- pars[which(testaccsT==max(testaccsT))]
+cat("For ParCorr the optimal number of neurons is", parmaxT, "\n")
+parmaxP <- pars[which(testaccsP==max(testaccsP))]
+cat("For PMIME the optimal number of neurons is", parmaxP, "\n")
+
+nnU <- kfold(k=folds, 
+      modelpred=nn_pred, 
+      par=list(parmaxU,    #size (number of neurons)
+               5000, #MaxNWts
+               300,  #maxit
+               10),  #number of retries
+      letter = 'U')
+
+nnT <- kfold(k=folds, 
+      modelpred=nn_pred, 
+      par=list(parmaxT,    #size (number of neurons)
+               5000, #MaxNWts
+               300,  #maxit
+               10),  #number of retries
+      letter = 'T')  
+
+nnP <- kfold(k=folds, 
+      modelpred=nn_pred, 
+      par=list(parmaxP,    #size (number of neurons)
+               5000, #MaxNWts
+               300,  #maxit
+               10),  #number of retries
+      letter = 'P')  
+```
+
+
+
+
+# Accuracy comparison
+
+| Model (Unthresholded ParCorr) | Testing accuracy | Loss from training accuracy | 
+|----------------------------------------------|-----------|-----------|
+| Logistic regression | `r glmU[[1]][2]` | `r glmU[[1]][1] - glmU[[1]][2]` | 
+| LASSO regression | `r lassoU[[1]][2]` | `r lassoU[[1]][1] - lassoU[[1]][2]` | 
+| Random forest | `r rfU[[1]][2]` | `r rfU[[1]][1] - rfU[[1]][2]` | 
+| Support vector machine | `r svmU[[1]][2]` | `r svmU[[1]][1] - svmU[[1]][2]` |  
+| Neural network | `r nnU[[1]][2]` | `r nnU[[1]][1] - nnU[[1]][2]` | 
+
+
+| Model (ParCorr) | Testing accuracy | Loss from training accuracy | 
+|----------------------------------------------|-----------|-----------|
+| Logistic regression | `r glmT[[1]][2]` | `r glmT[[1]][1] - glmT[[1]][2]` | 
+| LASSO regression | `r lassoT[[1]][2]` | `r lassoT[[1]][1] - lassoT[[1]][2]` | 
+| Random forest | `r rfT[[1]][2]` | `r rfT[[1]][1] - rfT[[1]][2]` | 
+| Support vector machine | `r svmT[[1]][2]` | `r svmT[[1]][1] - svmT[[1]][2]` |  
+| Neural network | `r nnT[[1]][2]` | `r nnT[[1]][1] - nnT[[1]][2]` | 
+
+
+| Model (PMIME) | Testing accuracy | Loss from training accuracy | 
+|----------------------------------------------|-----------|-----------|
+| Logistic regression | `r glmP[[1]][2]` | `r glmP[[1]][1] - glmP[[1]][2]` | 
+| LASSO regression | `r lassoP[[1]][2]` | `r lassoP[[1]][1] - lassoP[[1]][2]` | 
+| Random forest | `r rfP[[1]][2]` | `r rfP[[1]][1] - rfP[[1]][2]` | 
+| Support vector machine | `r svmP[[1]][2]` | `r svmP[[1]][1] - svmP[[1]][2]` |  
+| Neural network | `r nnP[[1]][2]` | `r nnP[[1]][1] - nnP[[1]][2]` | 
+
+```{r}
+library(scales)
+
+Unthresholded_ParCorr <- c(glmU[[1]][2],lassoU[[1]][2],rfU[[1]][2],svmU[[1]][2],nnU[[1]][2])
+u2 <- c(glmU[[1]][1] - glmU[[1]][2], 
+        lassoU[[1]][1] - lassoU[[1]][2], 
+        rfU[[1]][1] - rfU[[1]][2], 
+        svmU[[1]][1] - svmU[[1]][2], 
+        nnU[[1]][1] - nnU[[1]][2])
+ParCorr <- c(glmT[[1]][2],lassoT[[1]][2],rfT[[1]][2],svmT[[1]][2],nnT[[1]][2])
+t2 <- c(glmT[[1]][1] - glmT[[1]][2], 
+        lassoT[[1]][1] - lassoT[[1]][2], 
+        rfT[[1]][1] - rfT[[1]][2], 
+        svmT[[1]][1] - svmT[[1]][2], 
+        nnT[[1]][1] - nnT[[1]][2])
+PMIME <- c(glmP[[1]][2],lassoP[[1]][2],rfP[[1]][2],svmP[[1]][2],nnP[[1]][2])
+p2 <- c(glmP[[1]][1] - glmP[[1]][2], 
+        lassoP[[1]][1] - lassoP[[1]][2], 
+        rfP[[1]][1] - rfP[[1]][2], 
+        svmP[[1]][1] - svmP[[1]][2], 
+        nnP[[1]][1] - nnP[[1]][2])
+names <- c("Logistic regression", 
+           "LASSO regression", 
+           "Random forest", 
+           "Support vector machine", 
+           "Neural network")
+dtf <- as.data.frame(cbind(Unthresholded_ParCorr,ParCorr,PMIME,names))
+dtf <- melt(dtf, id.vars="names")
+dtf$value <- as.numeric(as.character(dtf$value))
+dtf$difs <- c(u2,t2,p2)
+dtf$difs[dtf$difs<0] <- min(dtf$difs[dtf$difs>0])*0.5 #for purposes of this plot, set negative losses to some positive value smaller than all other positive values
+
+ggplot(dtf, aes(variable, value)) + 
+  geom_point(aes(shape=names, colour=difs), size=5) +
+  scale_shape_manual(values = c(0,1,2,3,5)) +
+  scale_colour_gradient(low = "green", high = "red", trans=log10_trans()) +
+  theme(panel.background = element_rect(fill = "#303030",colour = "#7c7c7c",
+                                        size = 0.5, linetype = "solid"),
+        panel.grid.major = element_line(size = 0.5, linetype = 'solid', colour = "#7c7c7c"), 
+        panel.grid.minor = element_line(size = 0.25, linetype = 'solid',colour = "#7c7c7c")) +
+  ggtitle("Classification accuracy of algorithms for each causality measure") +
+  xlab("") +
+  ylab("Testing accuracy") +
+  labs(shape="Algorithm", colour="Loss from \n training accuracy \n (log scale)")
+
+```
+
+Loss from training accuracy is an indicator of overfitting. Training accuracy is optimised by the model and so is generally higher than testing accuracy. If there is a disparity between training and testing accuracy, the classifier model has been overfit on idiosyncrasies of the training set and does not generalise well to the 'unseen' testing set. 
+
+Other performance measures are also possible (AUC, information gain etc.) but our focus is more on prediction accuracy rather than model comparison.  
+
+# Metric importance comparison
+
+
+## AUC 
+
+```{r}
+#need to specify new dataframes since cost efficiency left unspecified previously
+all_U2 <- all_U
+all_U2[,23] <- scale(all_U[,15])-scale(all_U[,14]) #define cost efficiency
+all_T2 <- all_T
+all_T2[,23] <- scale(all_T[,15])-scale(all_T[,14]) #define cost efficiency
+all_P2 <- all_P
+all_P2[,23] <- scale(all_P[,15])-scale(all_P[,14]) #define cost efficiency
+
+```
+```{r}
+library(PRROC)
+
+#AUC importance measure
+aucU <- vector("numeric", 23)
+for (i in 1:23){
+  auc <- roc.curve(all_U2[,i][all_U2$schizophrenia==1], 
+                   all_U2[,i][all_U2$schizophrenia==0])$auc
+  aucU[i] <- auc - 0.5 #max(auc, 1-auc) #depends on whether variable predicts schiz. negatively or positively
+}
+
+aucT <- vector("numeric", 23)
+for (i in 1:23){
+  auc <- roc.curve(all_T2[,i][all_T2$schizophrenia==1], 
+                   all_T2[,i][all_T2$schizophrenia==0])$auc
+  aucT[i] <- auc - 0.5 #max(auc, 1-auc) #depends on whether variable predicts schiz. negatively or positively
+}
+
+aucP <- vector("numeric", 23)
+for (i in 1:23){
+  auc <- roc.curve(all_P2[,i][all_P2$schizophrenia==1],
+                   all_P2[,i][all_P2$schizophrenia==0])$auc
+  aucP[i] <- auc - 0.5 #max(auc, 1-auc) #depends on whether variable predicts schiz. negatively or positively
+}
+
+```
+
+```{r AUC analysis}
+names(aucU) <- names(all_U2)[1:23]
+ordaucU <- aucU[order(abs(aucU), decreasing = TRUE)] #ordered by magnitude
+
+dtf <- data.frame(x=names(ordaucU),y=ordaucU)
+ggplot(dtf, aes(x=names(ordaucU),y=ordaucU)) + 
+  geom_bar(stat = "identity", fill="#007005") + 
+  scale_y_continuous("AUC - 0.5") +
+  scale_x_discrete("metrics",limits=rev(names(ordaucU))) + #sort in user-specified order
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) + #rotate axis labels
+  coord_flip() + #flip axes
+  ggtitle("Metric AUC for unthresholded ParCorr")
+
+
+names(aucT) <- names(all_T2)[1:23]
+ordaucT <- aucT[order(abs(aucT), decreasing = TRUE)] #ordered by magnitude
+
+dtf <- data.frame(x=names(ordaucT),y=ordaucT)
+ggplot(dtf, aes(x=names(ordaucT),y=ordaucT)) + 
+  geom_bar(stat = "identity", fill="#1f7aa8") + 
+  scale_y_continuous("AUC - 0.5") +
+  scale_x_discrete("metrics",limits=rev(names(ordaucT))) + #sort in user-specified order
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) + #rotate axis labels
+  coord_flip() + #flip axes
+  ggtitle("Metric AUC for ParCorr")
+
+
+names(aucP) <- names(all_P2)[1:23]
+ordaucP <- aucP[order(abs(aucP), decreasing = TRUE)] #ordered by magnitude
+
+dtf <- data.frame(x=names(ordaucP),y=ordaucP)
+ggplot(dtf, aes(x=names(ordaucP),y=ordaucP)) + 
+  geom_bar(stat = "identity", fill="#a81f1f") + 
+  scale_y_continuous("AUC - 0.5") +
+  scale_x_discrete("metrics",limits=rev(names(ordaucP))) + #sort in user-specified order
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) + #rotate axis labels
+  coord_flip() + #flip axes
+  ggtitle("Metric AUC for PMIME")
+```
+
+
+## Permutation test
+
+```{r}
+meanpermtest <- function(hvals,     #vector of values for healthy patients
+                         svals,     #vector of values for schizophrenia patients
+                         nperms){   #number of permutations
+  n <- length(svals)                #number of schizophrenics
+  N <- length(hvals) + n            #total number of observations
+  truemeandiff <- abs(mean(hvals) - mean(svals)) #difference in mean val between healthy and schiz.
+
+  testmeandiff <- vector("numeric", nperms) #initialise
+  for (i in 1:nperms){
+    randsamp <- sample(c(hvals, svals))     #permute observed values
+    stest <- randsamp[1:n]                  #randomly assign labels
+    htest <- randsamp[(n+1):N]
+    testmeandiff[i] <- abs(mean(htest) - mean(stest)) #calculate mean diff for this permutation
+  }
+  timesmoreextreme <- max(1,sum(testmeandiff>truemeandiff)) #max(1,) to avoid pval=0
+  pval <- timesmoreextreme/nperms
+  return(pval)
+}
+
+
+#calculate for our dataset
+permU <- vector("numeric", 23)
+for (i in 1:23){
+  pval <- meanpermtest(all_U2[,i][all_U2$schizophrenia==0],
+                       all_U2[,i][all_U2$schizophrenia==1],
+                       10000)
+  permU[i] <- pval #-log(pval)
+}
+
+permT <- vector("numeric", 23)
+for (i in 1:23){
+  pval <- meanpermtest(all_T2[,i][all_T2$schizophrenia==0],
+                       all_T2[,i][all_T2$schizophrenia==1],
+                       10000)
+  permT[i] <- pval #-log(pval)
+}
+
+permP <- vector("numeric", 23)
+for (i in 1:23){
+  pval <- meanpermtest(all_P2[,i][all_T2$schizophrenia==0],
+                       all_P2[,i][all_T2$schizophrenia==1],
+                       10000)
+  permP[i] <- pval #-log(pval)
+}
+
+insig_varsU <- names(all_U2)[which(permU>0.05)]
+insig_varsT <- names(all_T2)[which(permT>0.05)]
+insig_varsP <- names(all_P2)[which(permP>0.05)]
+
+cat("For unthresholded ParCorr", insig_varsU, "are INsignificant at 5% level")
+cat("For ParCorr", insig_varsT, "are INsignificant at 5% level")
+cat("For PMIME", insig_varsP, "are INsignificant at 5% level")
+
+```
+
+
+## Overall results
+
+```{r}
+#function to scale all variables in dataset between 0 and 1
+scale01 <- function(dataset){
+  num_data <- dataset[sapply(dataset,is.numeric)] #exclude outcome and non numeric predictors
+  non_num_data <- dataset[!sapply(dataset,is.numeric)]
+  n <- dim(num_data)[1] #number of observations
+  m <- dim(num_data)[2] #number of numeric predictors
+  for (j in 1:m){
+    min <- min(num_data[,j]) #min for predictor j
+    max <- max(num_data[,j]) #max for predictor j
+    for (i in 1:n){
+      num_data[i,j] <- (num_data[i,j]-min)/(max-min) #for each observation i
+    }
+  }
+  dataset <- cbind(num_data, non_num_data) #re-combine
+  return(dataset)
+}
+
+```
+
+```{r}
+library(reshape2)
+#for unthresholded ParCorr
+glmU[[2]][24] = 0 #set NA to zero
+metrics <- names(all_U)[-c(24,25)]
+impmatU <- data.frame(abs(glmU[[2]][-1]), #log reg coef magnitude (remove intercept)
+                      c(-log(glmU2[[2]][-1]),0), #log reg -log(pval) (remove intercept, +0 for ce)
+                      abs(lassoU[[2]][-1]),  #lasso coef magnitude
+                      rfU[[2]], #random forest importance
+                      abs(aucU), #AUC
+                      metrics)
+impmatU <- scale01(impmatU) #standardise so all scores are on the same 0-1 scale
+impmatU <- melt(impmatU, id.vars = 'metrics') #transform to suitable dataframe for composite plot
+
+ggplot(impmatU, aes(x=metrics, y=value, fill=variable)) +
+  geom_bar(stat='identity', position='stack') +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) + #rotate axis labels
+  coord_flip() + #flip axes
+  ggtitle("Metric importance for unthresholded ParCorr") +
+  ylab("Importance score") + 
+  theme(legend.key.height=unit(1, "cm"), 
+        legend.text.align = 0) +
+  scale_fill_manual(name="Importance measure", 
+                    values = c("#42ccff","#0021a5","#821357", "#008e61", "#ff9000"), 
+                    labels=c(expression(paste("Logistic regression \n coefficient magnitude")),
+                             expression(paste("Logistic regression \n -log(pvalue)")),
+                             expression(paste("LASSO regression \n coefficient magnitude")), 
+                             expression(paste("Random forest \n Gini coefficient")),
+                             expression(paste("Metric AUC"))))
+
+
+#for ParCorr
+glmT[[2]][24] = 0 #set NA to zero
+metrics <- names(all_T)[-c(24,25)]
+impmatT <- data.frame(abs(glmT[[2]][-1]), #log reg coef magnitude (remove intercept)
+                      c(-log(glmT2[[2]][-1]),0), #log reg -log(pval) (remove intercept, +0 for ce)
+                      abs(lassoT[[2]][-1]),  #lasso coef magnitude
+                      rfT[[2]], #random forest importance
+                      abs(aucT), #AUC
+                      metrics)
+impmatT <- scale01(impmatT) #standardise so all scores are on the same 0-1 scale
+impmatT <- melt(impmatT, id.vars = 'metrics') #transform to suitable dataframe for composite plot
+
+ggplot(impmatT, aes(x=metrics, y=value, fill=variable)) +
+  geom_bar(stat='identity', position='stack') +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) + #rotate axis labels
+  coord_flip() + #flip axes
+  ggtitle("Metric importance for ParCorr") +
+  ylab("Importance score") + 
+  theme(legend.key.height=unit(1, "cm"), 
+        legend.text.align = 0) +
+  scale_fill_manual(name="Importance measure", 
+                    values = c("#42ccff","#0021a5","#821357", "#008e61", "#ff9000"), 
+                    labels=c(expression(paste("Logistic regression \n coefficient magnitude")),
+                             expression(paste("Logistic regression \n -log(pvalue)")),
+                             expression(paste("LASSO regression \n coefficient magnitude")), 
+                             expression(paste("Random forest \n Gini coefficient")),
+                             expression(paste("Metric AUC"))))
+
+
+
+#for PMIME
+glmP[[2]][24] = 0 #set NA to zero
+metrics <- names(all_P)[-c(24,25)]
+impmatP <- data.frame(abs(glmP[[2]][-1]), #log reg coef magnitude (remove intercept)
+                      c(-log(glmP2[[2]][-1]),0), #log reg -log(pval) (remove intercept, +0 for ce)
+                      abs(lassoP[[2]][-1]),  #lasso coef magnitude
+                      rfP[[2]], #random forest importance
+                      abs(aucP), #AUC
+                      metrics)
+impmatP <- scale01(impmatP) #standardise so all scores are on the same 0-1 scale
+impmatP <- melt(impmatP, id.vars = 'metrics') #transform to suitable dataframe for composite plot
+
+ggplot(impmatP, aes(x=metrics, y=value, fill=variable)) +
+  geom_bar(stat='identity', position='stack') +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) + #rotate axis labels
+  coord_flip() + #flip axes
+  ggtitle("Metric importance for PMIME") +
+  ylab("Importance score") + 
+  theme(legend.key.height=unit(1, "cm"), 
+        legend.text.align = 0) +
+  scale_fill_manual(name="Importance measure", 
+                    values = c("#42ccff","#0021a5","#821357", "#008e61", "#ff9000"), 
+                    labels=c(expression(paste("Logistic regression \n coefficient magnitude")),
+                             expression(paste("Logistic regression \n -log(pvalue)")),
+                             expression(paste("LASSO regression \n coefficient magnitude")), 
+                             expression(paste("Random forest \n Gini coefficient")),
+                             expression(paste("Metric AUC"))))
+```
+
+
+Coefficient magnitudes are a naive importance measure, as changing the included predictors in the regression model will change the magnitudes. Also magnitude alone is misleading if standard errors vary wildly.
+
+Coefficient pvalue corresponds to the pvalue in the hypothesis test that the coefficient is zero i.e. metric unrelated to schizophrenia. However the transformation we chose (-log) was arbitrary and just ensures that low pvalues are rewarded with high scores.
+
+Random forest Gini importance quantifies the ability of the metric to separate random subsets into schizophrenia = 0 or 1.
+
+AUC can be interpreted as the probability that a randomly chosen schizophrenic patient has higher value in this metric than a randomly chosen healthy patient (or lower value, if metric more negatively associated with schizophrenia)
+
