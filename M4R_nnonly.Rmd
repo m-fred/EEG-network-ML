@@ -1,0 +1,351 @@
+---
+title: "Machine learning study (neural network only)"
+author: "Matthew Fredericks"
+date: "24th September 2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning=FALSE, message=FALSE)
+
+```
+
+# Setup
+
+```{r}
+
+compile_from_scratch = FALSE #set TRUE if you have new patient metric data to create new dataframe
+
+if (compile_from_scratch==FALSE){
+  wd1 = getwd() #directory of patient metrics data
+  metricdata_filename = "metricdata_upc.txt" #"metricdata_bpc.txt" #"metricdata_pmime.txt"
+  all = read.delim(metricdata_filename)
+  all$schizophrenia = as.factor(all$schizophrenia)
+}
+
+if (compile_from_scratch==TRUE){
+
+  hpats = c('6140', '6227', '6232', '6255', '6383a', '6383b', '6395', '6396a', '6396b', '7577', '7890') #healthy patient ID
+  spats = c('6527', '7063', '7574', '7608', '7634', '7771', '7943') #schizophrenia patient ID
+
+  list <- vector(mode="list", length(hpats)+length(spats)) #initialise list of dataframes
+  count <- 0
+  
+  for (pat in hpats){
+    count <- count + 1
+    names(list)[count] <- pat
+    filename <- #paste(letter, 'metrics_pat', pat, '.txt', sep="")
+    list[[count]] <- read.delim(filename, header=FALSE) #import data
+  }
+  
+  for (pat in spats){
+    count <- count + 1
+    names(list)[count] <- pat
+    filename <- #paste(letter, 'metrics_pat', pat, '.txt', sep="")
+    list[[count]] <- read.delim(filename, header=FALSE) #import data
+  }
+  
+  sch = c(rep(0,length(hpats)),rep(1,length(spats))) #schizophrenia indicator
+  
+  for (i in 1:length(list)){ #for each patient
+    data1 <- list[[i]]       #retrieve dataframe
+    data <- na.omit(data1)   #listwise deletion of missing values
+    num_omitted <- dim(data1)[1]-dim(data)[1] #number of rows deleted
+    if (num_omitted != 0){
+      cat(num_omitted, "entries were deleted for patient", names(list)[i], 
+          "(batch:", batch, ") due to NAs \n")
+    }
+    data <- data[,-c(3,8,18,19)]   #remove out degree/strength mean as collinear with in degree/strength and local efficiency mean/sd (collinear with clustering coef)
+    data <- cbind(data, rep(0, dim(data)[1])) #initialise cost efficiency variable
+    data <- cbind(data, rep(names(list)[i], dim(data)[1])) #create subject ID variable
+    data <- cbind(data, factor(rep(sch[i], dim(data)[1]))) #create schizophrenia outcome variable
+    colnames(data) <- c("in_degree_mean",
+                       "in_degree_sd",
+    #                  "out_degree_mean",
+                       "out_degree_sd",
+                       "degree_difference_sd",
+                       "in_strength_mean",
+                       "in_strength_sd",
+    #                  "out_strength_mean",
+                       "out_strength_sd",
+                       "strength_difference_sd",
+                       "edge_betweenness_mean",
+                       "edge_betweenness_sd",
+                       "node_betweenness_mean",
+                       "node_betweenness_sd",
+                       "density",
+                       "wiring_cost",
+                       "global_efficiency",
+     #                  "local_efficiency_mean",
+     #                  "local_efficiency_sd",
+                       "modularity",
+                       "clustering_coefficient_mean",
+                       "clustering_coefficient_sd",
+                       "assortativity_oi",
+                       "assortativity_io",
+                       "assortativity_oo",
+                       "assortativity_ii",
+                       "cost_efficiency",
+                       "subject_id",
+                       "schizophrenia")
+    data <- as.data.frame(data)
+    list[[i]] <- data #update list
+  }
+  
+  all <- Reduce(function(dtf1, dtf2) merge(dtf1, dtf2, all=TRUE), list) #create merged dataset
+  colnames(all) <- colnames(data)
+  n <- dim(all)[1]
+
+}
+
+n <- dim(all)[1]
+m <- 22 #num_metrics not including created variables costefficiency, subjectid, schizophrenia
+
+```
+
+
+# Machine Learning
+
+In order to assess performance of classification algorithms, we must set aside an independent testing dataset that does not overlap with the training dataset used to train the algorithm. Therefore we should note that we cannot simply standardise all the data per patient like in the exploratory data analysis. This is because in order to best simulate operational conditions, the data used to train the algorithms should contain **NO** information about the data used to test the algorithms.
+
+This means we must standardise the testing set using the same scale as the training set. As we are essentially treating the testing data as unseen, it no longer makes sense to standardise each patient individually, as this would require finding the vector of training means/std. devs for each patient and scaling this patient's testing data by the same quantity (which implicitly assumes this patient is not unseen). Thus we standardise patients together, despite this meaning potential accuracy losses due to variation in experimental conditions per patient etc. 
+
+```{r}
+process_data <- function(train_inds, #indexes for training subset
+                         test_inds){  #indexes for testing subset
+
+  train <- all[train_inds,]      #training dataset
+  test <- all[test_inds,]        #testing dataset
+  
+  #standardise the predictors based on TRAIN data
+  trainmeans <- attr(scale(train[,1:m]),"scaled:center") #extract train means
+  trainsds <- attr(scale(train[,1:m]),"scaled:scale")    #extract train std. devs
+  train[,1:m] <- scale(train[,1:m])                     #standardise train data
+  test[,1:m] <- scale(test[,1:m],                       #standardise test data
+                       center=trainmeans,                 #use training means
+                       scale=trainsds)                    #use training std. devs
+  
+  #cost efficiency
+  ce <- train[,15]-train[,14] #variable based on train data (global efficiency - wiring cost)
+  cemean <- mean(ce)
+  cesd <- sd(ce)
+  train[,m+1] <- scale(ce)
+  test[,m+1] <- scale(test[,15]-test[,14], center=cemean, scale=cesd)
+  return(list(train, test))
+}
+
+
+
+
+kfold <- function(k,          #number of folds
+                  modelpred,  #classification function which predicts labels of inputs given training data
+                  par){        #optional parameters needed for modelpred function
+  
+  train_acc <- vector("numeric", k)  #initialise vector of accuracy on train data per fold
+  test_acc <- vector("numeric", k)   #initialise vector of accuracy on test data per fold
+  train_coefs <- vector("list", k)   #initialise list of coefficient values per fold
+  
+  randseq <- sample(n, n)    #initialise random sequence (unchanged for all folds)
+  size <- floor(n/k)         #size of test set for each fold
+
+  for (fold in 1:k){         #now fold:
+    test_inds <- randseq[((fold-1)*size+1):(fold*size)] #take (progressive) slices as testing
+    train_inds <- (1:n)[-test_inds] #remaining indices for training
+
+    datalist <- process_data(train_inds, test_inds) #construct standardised datasets using these indices
+    train <- datalist[[1]]       #assign training data
+    test <- datalist[[2]]        #assign testing data
+    train_y <- train[,m+3]        #training labels
+    train_x <- train[,-c(m+2,m+3)] #training inputs 
+    test_y <- test[,m+3]          #testing labels
+    test_x <- test[,-c(m+2,m+3)]   #testing inputs 
+    
+    mtrain <- modelpred(train_x, train_x, train_y, par) #predict labels for training inputs
+    mtest <- modelpred(test_x, train_x, train_y, par)   #predict labels for testing inputs
+    
+    train_preds <- mtrain[[1]] #obtain predictions for training inputs
+    train_coefs[[fold]] <- mtrain[[2]] #optional model coefficients
+    test_preds <- mtest[[1]] #obtain predictions for testing inputs
+
+    train_acc[fold] <- sum(train_y==train_preds)/length(train_y) #compare with actual y for acc.
+    test_acc[fold] <- sum(test_y==test_preds)/length(test_y)     #compare with actual y for acc.
+  }
+  means <- c(mean(train_acc), mean(test_acc)) #average accuracies over all the folds
+  coefs <- 0
+  for (i in 1:k){coefs <- coefs + train_coefs[[i]]}
+  coefs <- coefs/k #average optional model coefficients over all the folds
+  return(list(means, coefs)) #output cross-validated train and test accuracies, and mean coef vals
+}
+```
+
+```{r set folds}
+#set number of folds
+folds <- 5
+```
+
+
+We might instead decide to use individual patients for training/testing. This way we can ensure an individual's data is not being used for both training and testing.
+
+
+```{r new method}
+hpats = c('6140', '6227', '6232', '6255', '6383a', '6383b', '6395', '6396a', '6396b', '7577', '7890') #healthy patient ID
+spats = c('6527', '7063', '7574', '7608', '7634', '7771', '7943') #schizophrenia patient ID
+idlist <- c(hpats,spats)
+
+
+kfold2 <- function(modelpred,  #classification function which predicts labels of inputs given training data
+                  par){        #optional parameters needed for modelpred function
+  
+  #######################################  NEW PART  #################################
+  #each fold is a different patient
+  k <- length(idlist)
+  train_acc <- vector("numeric", k)  #initialise vector of accuracy on train data per fold
+  test_acc <- vector("numeric", k)   #initialise vector of accuracy on test data per fold
+  train_coefs <- vector("list", k)   #initialise list of coefficient values per fold
+
+  for (fold in 1:k){         #now fold:
+    pat <- idlist[k] #get patient id to test on
+    test_inds <- which(all$subject_id==pat) #indices in data that match this id
+    train_inds <- which(all$subject_id!=pat) #indices that don't match
+  ####################################################################################
+
+    datalist <- process_data(train_inds, test_inds) #construct standardised datasets using these indices
+    train <- datalist[[1]]       #assign training data
+    test <- datalist[[2]]        #assign testing data
+    train_y <- train[,m+3]        #training labels
+    train_x <- train[,-c(m+2,m+3)] #training inputs 
+    test_y <- test[,m+3]          #testing labels
+    test_x <- test[,-c(m+2,m+3)]   #testing inputs 
+    
+    mtrain <- modelpred(train_x, train_x, train_y, par) #predict labels for training inputs
+    mtest <- modelpred(test_x, train_x, train_y, par)   #predict labels for testing inputs
+    
+    train_preds <- mtrain[[1]] #obtain predictions for training inputs
+    train_coefs[[fold]] <- mtrain[[2]] #optional model coefficients
+    test_preds <- mtest[[1]] #obtain predictions for testing inputs
+
+    train_acc[fold] <- sum(train_y==train_preds)/length(train_y) #compare with actual y for acc.
+    test_acc[fold] <- sum(test_y==test_preds)/length(test_y)     #compare with actual y for acc.
+  }
+  means <- c(mean(train_acc), mean(test_acc)) #average accuracies over all the folds
+  coefs <- 0
+  for (i in 1:k){coefs <- coefs + train_coefs[[i]]}
+  coefs <- coefs/k #average optional model coefficients over all the folds
+  return(list(means, coefs)) #output cross-validated train and test accuracies, and mean coef vals
+}
+
+```
+
+
+
+## Artificial neural network
+
+```{r nn function}
+library(nnet)
+
+nn_pred <- function(inputs, train_x, train_y, 
+                    par){ #par = list(size, MaxNWts, maxit, num_tries)
+  num_tries <- par[[4]]
+  nn_list <- vector("list", num_tries) #initialise list of nns
+  vals <- vector("numeric", num_tries) #initialise vector of final optimisation vals
+  for (i in 1:num_tries){
+    nn <- nnet(train_y ~., data=train_x, 
+               size=par[[1]], MaxNWts=par[[2]], maxit=par[[3]], trace=FALSE)
+    nn_list[[i]] <- nn #record this nn
+    vals[i] <- nn$value #record final optimisation value
+  }
+  min <- which(vals==min(vals)) #index of nn with the lowest final optimisation value
+  bestnn <- nn_list[[min]] #retrieve this nn
+  preds <- predict(bestnn, inputs, type="class")
+  coefs <- NA
+  return(list(preds, coefs))
+}
+```
+
+```{r nn parameter optimisation}
+pars <- c(seq(1,10,1))
+x <- length(pars)
+trainaccs <- vector("numeric", x)
+testaccs <- vector("numeric", x)
+trainaccs2 <- vector("numeric", x)
+testaccs2 <- vector("numeric", x)
+
+count = 0
+for (par in pars){
+  count = count+1
+  nn <- kfold(k=folds, modelpred=nn_pred, par=list(par,5000,300,10))
+  trainaccs[count] <- nn[[1]][1]
+  testaccs[count] <- nn[[1]][2]
+  
+  nn2 <- kfold2(modelpred=nn_pred, par=list(par,5000,300,10))
+  trainaccs2[count] <- nn2[[1]][1]
+  testaccs2[count] <- nn2[[1]][2]
+  
+}
+
+```
+
+```{r nn parameter optimisation plot}
+library(ggplot2)
+library(gridExtra)
+library(reshape)
+
+plot1 <- ggplot(melt(as.data.frame(cbind(pars, trainaccs, testaccs)), id.vars="pars")) + 
+  geom_line(aes(x=pars, y=value, col=variable, linetype=variable)) + 
+  ggtitle("Neural network parameter optimisation") +
+  xlab("Number of neurons") +
+  ylab("Accuracy") +
+  scale_colour_manual(values=c("#6bff66","#007005"), labels=c("Training", "Testing")) +
+  scale_linetype_manual(values=c(2, 1), labels=c("Training","Testing")) +
+  theme(text = element_text(size=25),
+        legend.position=c(.25, .9), legend.title=element_blank())
+
+
+plot2 <- ggplot(melt(as.data.frame(cbind(pars, trainaccs2, testaccs2)), id.vars="pars")) + 
+  geom_line(aes(x=pars, y=value, col=variable, linetype=variable)) + 
+  ggtitle("Neural network parameter optimisation (per patient testing)") +
+  xlab("Number of neurons") +
+  ylab("Accuracy") +
+  scale_colour_manual(values=c("#6bff66","#007005"), labels=c("Training", "Testing")) +
+  scale_linetype_manual(values=c(2, 1), labels=c("Training","Testing")) +
+  theme(text = element_text(size=25),
+        legend.position=c(.25, .9), legend.title=element_blank())
+
+grid.arrange(plot1, plot2, ncol=2)
+#ggsave("nnopt.png",grid.arrange(plot1, plot2, plot3, ncol=3),height=7,width=15)
+
+```
+
+```{r nn final model}
+parmax <- pars[which(testaccs==max(testaccs))]
+cat("The optimal number of neurons is", parmax, "\n")
+
+parmax2 <- pars[which(testaccs2==max(testaccs2))]
+cat("The optimal number of neurons (per patient testing) is", parmax2, "\n")
+
+nn <- kfold(k=folds, 
+      modelpred=nn_pred, 
+      par=list(parmax,    #size (number of neurons)
+               5000, #MaxNWts
+               300,  #maxit
+               10))  #number of retries
+
+nn2 <- kfold2(modelpred=nn_pred, 
+              par=list(parmax2,    #size (number of neurons)
+                       5000, #MaxNWts
+                       300,  #maxit
+                       10))  #number of retries
+
+```
+
+
+
+
+# Final Accuracy 
+
+| Model | Testing accuracy | Loss from training accuracy | 
+|----------------------------------------------|-----------|-----------|
+| Neural network (random 5-fold testing) | `r nn[[1]][2]` | `r nn[[1]][1] - nn[[1]][2]` | 
+| Neural network (per patient testing) | `r nn2[[1]][2]` | `r nn2[[1]][1] - nn2[[1]][2]` | 
+
+
