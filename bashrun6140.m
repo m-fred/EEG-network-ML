@@ -17,6 +17,6 @@ n = size(Mat,1);
 dims = size(Mat,2);
 
 [RM,ecC] = PMIMEsig(Mat(i+1:i+1000,:),5,1,5,100,0.05,0);
-dlmwrite(strcat('P_mat',int2str(i),'_pat',pat,'.txt'),RM,'delimiter','\t');
+dlmwrite(strcat('P_mat_pat',pat,'_',int2str(i),'.txt'),RM,'delimiter','\t');
 
 end
