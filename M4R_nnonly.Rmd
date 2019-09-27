@@ -174,7 +174,7 @@ kfold <- function(k,          #number of folds
   coefs <- 0
   for (i in 1:k){coefs <- coefs + train_coefs[[i]]}
   coefs <- coefs/k #average optional model coefficients over all the folds
-  return(list(means, coefs)) #output cross-validated train and test accuracies, and mean coef vals
+  return(list(means, coefs, train_acc, test_acc)) #output cross-validated train and test accuracies, and mean coef vals
 }
 ```
 
@@ -231,7 +231,7 @@ kfold2 <- function(modelpred,  #classification function which predicts labels of
   coefs <- 0
   for (i in 1:k){coefs <- coefs + train_coefs[[i]]}
   coefs <- coefs/k #average optional model coefficients over all the folds
-  return(list(means, coefs)) #output cross-validated train and test accuracies, and mean coef vals
+  return(list(means, coefs, train_acc, test_acc)) #output cross-validated train and test accuracies, and mean coef vals
 }
 
 ```
@@ -339,13 +339,27 @@ nn2 <- kfold2(modelpred=nn_pred,
 ```
 
 
+# Per patient accuracies
+
+```{r}
+
+accdf <- data.frame(cbind(idlist, 
+                          c(rep("Healthy",length(hpats)),rep("Schizophrenic",length(spats))),
+                          nn2[[3]],
+                          nn2[[4]],
+                          nn2[[3]]-nn2[[4]]))
+colnames(accdf) <- c("Patient ID", "Status", "Training accuracy", "Testing accuracy", "Loss from training accuracy")
+accdf
+```
 
 
-# Final Accuracy 
 
-| Model | Testing accuracy | Loss from training accuracy | 
-|----------------------------------------------|-----------|-----------|
-| Neural network (random 5-fold testing) | `r nn[[1]][2]` | `r nn[[1]][1] - nn[[1]][2]` | 
-| Neural network (per patient testing) | `r nn2[[1]][2]` | `r nn2[[1]][1] - nn2[[1]][2]` | 
+
+# Average accuracies 
+
+| Model | Training accuracy | Testing accuracy | Loss from training accuracy | 
+|----------------------------------------------|-----------|-----------|----------|
+| Neural network (random 5-fold testing) | `r nn[[1]][1]` | `r nn[[1]][2]` | `r nn[[1]][1] - nn[[1]][2]` | 
+| Neural network (per patient testing) | `r nn2[[1]][1]` | `r nn2[[1]][2]` | `r nn2[[1]][1] - nn2[[1]][2]` | 
 
 
