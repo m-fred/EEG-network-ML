@@ -1,0 +1,351 @@
+---
+title: "Machine learning study (neural network only, eyes open/closed handled separately)"
+author: "Matthew Fredericks"
+date: "24th September 2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning=FALSE, message=FALSE)
+
+
+#notes:
+#treating eyes open and closed separately for now
+#have not been able to get good results using per patient testing (though 90%+ was seen using 5fold cross-validation across the whole dataset)
+#maybe attempts were unsuccessful due to not trying enough neurons (did not try above 10)
+#created a new function 'nnlayered_pred' which implements multi-layer neural network, but have not been able to get this to converge/run properly
+
+```
+
+# Setup
+
+
+```{r run settings}
+##########################################
+retries <- 5 #neural network retries per fit
+##########################################
+skipoptimisation <- TRUE #skip optimisation for number of neurons 
+if (skipoptimisation==TRUE){
+  parmax1 <- 5 #num of neurons in hidden layer for eyes closed data
+  parmax2 <- 5 #num of neurons in hidden layer for eyes open data
+}
+##########################################
+reducemetrics <- FALSE #use only 11 metrics tested prior to be statistically significant
+
+```
+
+
+
+```{r}
+wd1 = getwd() #directory of patient metrics data
+
+#metricdata_filename = "metricdata_upc.txt" #"metricdata_bpc.txt" #"metricdata_pmime.txt"
+#all = read.delim(metricdata_filename)
+#all$schizophrenia = as.factor(all$schizophrenia)
+
+metricdata_filename = "Metrics_recon_filtered.csv" ### new dataset with eyes closed (state 0)/eyes open (state 1)
+raw = read.delim(metricdata_filename, header=TRUE, sep=",")
+all <- raw[,-1] #remove X label
+all$subject_id <- as.factor(all$subject_id)
+all$state <- as.factor(all$state)
+all$schizophrenia <- as.factor(all$schizophrenia)
+all1 <- all[which(all$state==levels(all$state)[1]),] #eyes closed data
+all2 <- all[which(all$state==levels(all$state)[2]),] #eyes open data
+all1 <- cbind(scale(all1[,unlist(lapply(all1, is.numeric))]),
+              all1[,!unlist(lapply(all1, is.numeric))]) #standardise only numeric columns
+all2 <- cbind(scale(all2[,unlist(lapply(all2, is.numeric))]),
+              all2[,!unlist(lapply(all2, is.numeric))]) #standardise only numeric columns
+all <- rbind(all1,all2) #recombine
+
+
+
+if (reducemetrics==TRUE){
+  all <- all[,c(2,3,5,6,7,9,11,14,18,20,22,23,24,25)]
+  all1 <- all1[,c(2,3,5,6,7,9,11,14,18,20,22,23,24,25)]
+  all2 <- all2[,c(2,3,5,6,7,9,11,14,18,20,22,23,24,25)]
+}
+
+n <- dim(all)[1]
+m <- dim(all)[2] - 3 #num_metrics not including categories
+
+
+
+idlist <- levels(all$subject_id) 
+schizlist <- vector("numeric", length(idlist))
+for (i in 1:length(idlist)){
+  schizlist[i] <- all$schizophrenia[which(all$subject_id==idlist[i])][1]
+}
+
+```
+
+
+# Machine Learning
+
+In order to assess performance of classification algorithms, we must set aside an independent testing dataset that does not overlap with the training dataset used to train the algorithm. Therefore we should note that we cannot simply standardise all the data per patient like in the exploratory data analysis. This is because in order to best simulate operational conditions, the data used to train the algorithms should contain **NO** information about the data used to test the algorithms.
+
+This means we must standardise the testing set using the same scale as the training set. As we are essentially treating the testing data as unseen, it no longer makes sense to standardise each patient individually, as this would require finding the vector of training means/std. devs for each patient and scaling this patient's testing data by the same quantity (which implicitly assumes this patient is not unseen). Thus we standardise patients together, despite this meaning potential accuracy losses due to variation in experimental conditions per patient etc. 
+
+We might instead decide to use individual patients for training/testing. This way we can ensure an individual's data is not being used for both training and testing.
+
+```{r}
+process_data2 <- function(all, #dataset
+                          train_inds, #indexes for training subset
+                          test_inds){  #indexes for testing subset
+
+  train <- all[train_inds,]      #training dataset
+  test <- all[test_inds,]        #testing dataset
+  
+  #standardise the predictors based on TRAIN data
+  trainmeans <- attr(scale(train[,1:m]),"scaled:center") #extract train means
+  trainsds <- attr(scale(train[,1:m]),"scaled:scale")    #extract train std. devs
+  train[,1:m] <- scale(train[,1:m])                     #standardise train data
+  test[,1:m] <- scale(test[,1:m],                       #standardise test data
+                       center=trainmeans,                 #use training means
+                       scale=trainsds)                    #use training std. devs
+  
+  return(list(train, test))
+}
+
+
+
+
+
+
+
+patcrossvalidate <- function(all,        #dataset
+                   modelpred,  #classification function which predicts labels of inputs given training data
+                   par){        #optional parameters needed for modelpred function
+  
+  #######################################  NEW PART  #################################
+  #each fold is a different patient
+  k <- length(idlist)
+  train_acc <- vector("numeric", k)  #initialise vector of accuracy on train data per fold
+  test_acc <- vector("numeric", k)   #initialise vector of accuracy on test data per fold
+  train_coefs <- vector("list", k)   #initialise list of coefficient values per fold
+
+  for (fold in 1:k){         #now fold:
+    pat <- idlist[fold] #get patient id to test on
+    test_inds <- which(all$subject_id==pat) #indices in data that match this id
+    train_inds <- which(all$subject_id!=pat) #indices that don't match
+  ####################################################################################
+
+    datalist <- process_data2(all, train_inds, test_inds) #construct standardised datasets using these indices
+    train <- datalist[[1]]       #assign training data
+    test <- datalist[[2]]        #assign testing data
+    train_y <- train[,m+3]        #training labels
+    train_x <- train[,-c(m+1,m+2,m+3)] #training inputs 
+    test_y <- test[,m+3]          #testing labels
+    test_x <- test[,-c(m+1,m+2,m+3)]   #testing inputs 
+    
+    mtrain <- modelpred(train_x, train_x, train_y, par) #predict labels for training inputs
+    mtest <- modelpred(test_x, train_x, train_y, par)   #predict labels for testing inputs
+    
+    train_preds <- mtrain[[1]] #obtain predictions for training inputs
+    train_coefs[[fold]] <- mtrain[[2]] #optional model coefficients
+    test_preds <- mtest[[1]] #obtain predictions for testing inputs
+
+    train_acc[fold] <- sum(train_y==train_preds)/length(train_y) #compare with actual y for acc.
+    test_acc[fold] <- sum(test_y==test_preds)/length(test_y)     #compare with actual y for acc.
+
+  }
+  means <- c(mean(train_acc), mean(test_acc)) #average accuracies over all the folds
+  coefs <- 0
+  for (i in 1:k){coefs <- coefs + train_coefs[[i]]}
+  coefs <- coefs/k #average optional model coefficients over all the folds
+  return(list(means, coefs, train_acc, test_acc)) #output cross-validated train and test accuracies, and mean coef vals
+}
+
+```
+
+
+
+## Artificial neural network
+
+
+```{r nn function}
+#single layer neural network function
+library(nnet)
+
+nn_pred <- function(inputs, train_x, train_y, 
+                    par){ #par = list(size, MaxNWts, maxit, num_tries)
+  num_tries <- par[[4]]
+  nn_list <- vector("list", num_tries) #initialise list of nns
+  vals <- vector("numeric", num_tries) #initialise vector of final optimisation vals
+  for (i in 1:num_tries){
+    #cat(paste("try",i,"\n"))
+    nn <- nnet(train_y ~., data=train_x, 
+               size=par[[1]], MaxNWts=par[[2]], maxit=par[[3]], trace=FALSE)
+    nn_list[[i]] <- nn #record this nn
+    vals[i] <- nn$value #record final optimisation value
+  }
+  min <- which(vals==min(vals)) #index of nn with the lowest final optimisation value
+  bestnn <- nn_list[[min]] #retrieve this nn
+  preds <- predict(bestnn, inputs, type="class")
+  coefs <- NA
+  return(list(preds, coefs))
+}
+
+
+
+#trialing function that allows multiple layers
+library(neuralnet)
+
+nnlayered_pred <- function(inputs, train_x, train_y, 
+                    par){ #par = list(num neurons, num layers, num_tries)
+  traindata <- as.data.frame(cbind(train_y, train_x))
+  inputs <- as.data.frame(inputs)
+  #print(summary(inputs))
+  
+  nn <- neuralnet(train_y~.,
+                  data=traindata,
+                  hidden=rep(par[[1]],par[[2]]),
+                  rep=par[[3]])
+  #preds <- predict(nn, inputs)
+  #coefs <- NA
+  #return(list(preds, coefs))
+  return(list(nn))
+}
+```
+
+
+
+
+```{r nn parameter optimisation}
+if (skipoptimisation==FALSE){
+  pars <- c(seq(1,9,1))
+  x <- length(pars)
+  trainaccs1 <- vector("numeric", x)
+  testaccs1 <- vector("numeric", x)
+  trainaccs2 <- vector("numeric", x)
+  testaccs2 <- vector("numeric", x)
+  
+  count = 0
+  
+  for (par in pars){
+    count = count+1
+    
+    message(paste("trying with:",par,"neurons for eyes closed data","\n"))
+    #nn1 <- patcrossvalidate(all=all1, modelpred=nn_pred, par=list(par,5000,300,retries)) #single hidden layer
+    nn1 <- patcrossvalidate(all=all1, modelpred=nnlayered_pred, par=list(par,1,retries)) #multiple hidden layer
+    
+    trainaccs1[count] <- nn1[[1]][1]
+    testaccs1[count] <- nn1[[1]][2]
+    
+    message(paste("trying with:",par,"neurons for eyes open data","\n"))
+    #nn2 <- patcrossvalidate(all=all2, modelpred=nn_pred, par=list(par,5000,300,retries)) #single hidden layer
+    nn2 <- patcrossvalidate(all=all2, modelpred=nnlayered_pred, par=list(par,1,retries)) #multiple hidden layer
+    
+    trainaccs2[count] <- nn2[[1]][1]
+    testaccs2[count] <- nn2[[1]][2]
+    
+  }
+}
+
+
+```
+
+```{r nn parameter optimisation plot}
+library(ggplot2)
+library(gridExtra)
+library(reshape)
+
+if (skipoptimisation==FALSE){
+  
+  plot1 <- ggplot(melt(as.data.frame(cbind(pars, trainaccs1, testaccs1)), id.vars="pars")) + 
+  geom_line(aes(x=pars, y=value, col=variable, linetype=variable)) + 
+  ggtitle("Neural network parameter optimisation (eyes closed)") +
+  xlab("Number of neurons") +
+  ylab("Accuracy") +
+  scale_colour_manual(values=c("#6bff66","#007005"), labels=c("Training", "Testing")) +
+  scale_linetype_manual(values=c(2, 1), labels=c("Training","Testing")) +
+  theme(text = element_text(size=25),
+        legend.position=c(.25, .9), legend.title=element_blank())
+
+  plot2 <- ggplot(melt(as.data.frame(cbind(pars, trainaccs2, testaccs2)), id.vars="pars")) + 
+  geom_line(aes(x=pars, y=value, col=variable, linetype=variable)) + 
+  ggtitle("Neural network parameter optimisation (eyes open)") +
+  xlab("Number of neurons") +
+  ylab("Accuracy") +
+  scale_colour_manual(values=c("#6bff66","#007005"), labels=c("Training", "Testing")) +
+  scale_linetype_manual(values=c(2, 1), labels=c("Training","Testing")) +
+  theme(text = element_text(size=25),
+        legend.position=c(.25, .9), legend.title=element_blank())
+
+grid.arrange(plot1, plot2, ncol=2)
+#ggsave("nnopt.png",grid.arrange(plot1, plot2, ncol=2),height=7,width=15)
+}
+
+
+
+```
+
+```{r nn final model}
+if (skipoptimisation==FALSE){
+parmax1 <- pars[which(testaccs1==max(testaccs1))]
+cat("The optimal number of neurons (eyes closed) is", parmax1, "\n")
+  
+parmax2 <- pars[which(testaccs2==max(testaccs2))]
+cat("The optimal number of neurons (eyes open) is", parmax2, "\n")
+}
+
+#nn1 <- patcrossvalidate(all=all1,
+#                        modelpred=nn_pred, 
+#                        par=list(parmax1,    #size (number of neurons)
+#                                 5000,       #MaxNWts
+#                                 300,        #maxit
+#                                retries))   #number of retries
+
+
+#nn2 <- patcrossvalidate(all=all2,
+#                        modelpred=nn_pred, 
+#                        par=list(parmax2,    #size (number of neurons)
+#                                 5000,       #MaxNWts
+#                                 300,        #maxit
+#                                 retries))   #number of retries
+
+nn1 <- patcrossvalidate(all=all1, modelpred=nnlayered_pred, par=list(parmax1,1,retries))
+nn2 <- patcrossvalidate(all=all2, modelpred=nnlayered_pred, par=list(parmax2,1,retries))
+
+
+```
+
+
+# Per patient accuracies
+
+## Eyes closed data
+
+```{r}
+accdf1 <- data.frame(cbind(idlist, 
+                           ifelse(schizlist=="2","Schizophrenic","Healthy"),
+                           nn1[[3]],
+                           nn1[[4]],
+                           nn1[[3]]-nn1[[4]]))
+
+colnames(accdf1) <- c("Patient ID", "Label", "Training accuracy", "Testing accuracy", "Loss from training accuracy")
+knitr::kable(accdf1)
+```
+
+## Eyes open data
+
+```{r}
+accdf2 <- data.frame(cbind(idlist, 
+                           ifelse(schizlist=="2","Schizophrenic","Healthy"),
+                           nn2[[3]],
+                           nn2[[4]],
+                           nn2[[3]]-nn2[[4]]))
+
+colnames(accdf2) <- c("Patient ID", "Label", "Training accuracy", "Testing accuracy", "Loss from training accuracy")
+knitr::kable(accdf2)
+```
+
+
+
+
+# Average accuracies 
+
+| Model | Training accuracy | Testing accuracy | Loss from training accuracy | 
+|----------------------------------------------|-----------|-----------|----------|
+| Neural network (eyes closed) | `r nn1[[1]][1]` | `r nn1[[1]][2]` | `r nn1[[1]][1] - nn1[[1]][2]` | 
+| Neural network (eyes open) | `r nn2[[1]][1]` | `r nn2[[1]][2]` | `r nn2[[1]][1] - nn2[[1]][2]` | 
+
+
